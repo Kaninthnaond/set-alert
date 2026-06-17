@@ -1,0 +1,45 @@
+# .github/workflows/set_alert.yml
+# ============================================================
+# SET Stock Alert — รันอัตโนมัติทุกวันจันทร์-ศุกร์
+# หลังตลาด SET ปิด (10:10 UTC = 17:10 น. เวลาไทย)
+# ============================================================
+
+name: SET Stock Alert
+
+on:
+  schedule:
+    # cron: "นาที ชั่วโมง วัน เดือน วันในสัปดาห์"
+    # 1-5 = จันทร์-ศุกร์ (0=อาทิตย์, 6=เสาร์)
+    - cron: "10 10 * * 1-5"
+
+  # รันด้วยมือได้จาก Actions tab
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # 1. checkout code
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. ติดตั้ง Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 3. ติดตั้ง library (cache ไว้เร็วขึ้น)
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pandas pandas_ta requests
+
+      # 4. รัน script — secrets ส่งผ่าน env
+      - name: Run SET Alert
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python set_alert_final.py
