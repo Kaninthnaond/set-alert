@@ -80,9 +80,16 @@ def fetch_ohlcv(ticker: str) -> pd.DataFrame | None:
 # ============================================================
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["ema_fast"] = ta.ema(df["Close"], length=EMA_FAST)
-    df["ema_slow"] = ta.ema(df["Close"], length=EMA_SLOW)
-    df["atr"]      = ta.atr(df["High"], df["Low"], df["Close"], length=ATR_PERIOD)
+    # EMA — คำนวณด้วย pandas ewm โดยตรง
+    df["ema_fast"] = df["Close"].ewm(span=EMA_FAST, adjust=False).mean()
+    df["ema_slow"] = df["Close"].ewm(span=EMA_SLOW, adjust=False).mean()
+    # ATR — คำนวณเอง
+    df["tr"] = pd.concat([
+        df["High"] - df["Low"],
+        (df["High"] - df["Close"].shift(1)).abs(),
+        (df["Low"]  - df["Close"].shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    df["atr"] = df["tr"].ewm(span=ATR_PERIOD, adjust=False).mean()
     return df.dropna().reset_index(drop=True)
 
 
