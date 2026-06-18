@@ -1,26 +1,21 @@
 """
-SET Stock Alert — GitHub Actions Edition
-- ดึงข้อมูลจาก Stooq (เสถียรกว่า Yahoo Finance, ไม่ต้อง API key)
-- ส่ง Telegram (GitHub Actions ไม่บล็อก network ใดๆ)
-- รันอัตโนมัติทุกวัน 10:05 UTC = 17:05 น. เวลาไทย
+SET Stock Alert — GitHub Actions Edition (no pandas_ta)
+EMA และ ATR คำนวณด้วย pandas โดยตรง
 """
+import os, sys, time, logging, requests
+import pandas as pd
+from datetime import datetime
+from io import StringIO
 
 # ============================================================
-# ⚙️  CONFIG  (ค่าจริงใส่ใน GitHub Secrets — ไม่ใส่ตรงนี้)
-# ============================================================
-import os
-
-TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]    # GitHub Secret
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]  # GitHub Secret
+TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 WATCHLIST = [
-    # --- Dividend ---
     "BDMS.BK", "BCH.BK",  "MEGA.BK",  "AP.BK",
     "SCB.BK",  "KTB.BK",  "TTW.BK",   "RATCH.BK", "RAM.BK",
-    # --- Growth ---
     "SNNP.BK", "TFM.BK",  "OSP.BK",   "BGRIM.BK",
     "COCOCO.BK","OR.BK",  "TU.BK",
-    # --- Trading ---
     "ASW.BK",  "AURA.BK", "BAM.BK",   "DIF.BK",
     "NER.BK",  "SAK.BK",  "SJWD.BK",  "SPRC.BK",
 ]
@@ -28,15 +23,7 @@ WATCHLIST = [
 EMA_FAST   = 12
 EMA_SLOW   = 26
 ATR_PERIOD = 14
-
 # ============================================================
-# 📦  Imports
-# ============================================================
-import sys, time, logging, requests
-import pandas as pd
-import pandas_ta as ta
-from datetime import datetime
-from io import StringIO
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,27 +32,22 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ============================================================
-# 📈  Data — ใช้ Stooq (ไม่ต้อง API key, เสถียร, ไม่ถูกบล็อก)
-# ============================================================
+
 def stooq_ticker(ticker: str) -> str:
-    """แปลง Yahoo ticker → Stooq ticker  เช่น BDMS.BK → bdms.th"""
     code, exch = ticker.upper().split(".")
-    mapping = {"BK": "th"}
-    return f"{code.lower()}.{mapping.get(exch, exch.lower())}"
+    return f"{code.lower()}.{'th' if exch == 'BK' else exch.lower()}"
 
 
 def fetch_ohlcv(ticker: str) -> pd.DataFrame | None:
-    stooq = stooq_ticker(ticker)
-    url   = f"https://stooq.com/q/d/l/?s={stooq}&i=d"
+    url = f"https://stooq.com/q/d/l/?s={stooq_ticker(ticker)}&i=d"
     try:
         r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code != 200 or len(r.text) < 100:
-            log.warning(f"{ticker}: Stooq HTTP {r.status_code}")
+            log.warning(f"{ticker}: HTTP {r.status_code}")
             return None
         df = pd.read_csv(StringIO(r.text), parse_dates=["Date"])
+        df.columns = [c.strip().title() for c in df.columns]
         df = df.sort_values("Date").reset_index(drop=True)
-        df.columns = [c.strip().title() for c in df.columns]  # normalize
         if len(df) < 40:
             log.warning(f"{ticker}: ข้อมูลน้อยเกินไป ({len(df)} rows)")
             return None
@@ -75,21 +57,19 @@ def fetch_ohlcv(ticker: str) -> pd.DataFrame | None:
         return None
 
 
-# ============================================================
-# 📊  Indicators & Signals
-# ============================================================
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # EMA — คำนวณด้วย pandas ewm โดยตรง
+    # EMA ด้วย pandas ewm
     df["ema_fast"] = df["Close"].ewm(span=EMA_FAST, adjust=False).mean()
     df["ema_slow"] = df["Close"].ewm(span=EMA_SLOW, adjust=False).mean()
-    # ATR — คำนวณเอง
-    df["tr"] = pd.concat([
+    # ATR คำนวณเอง
+    prev_close = df["Close"].shift(1)
+    tr = pd.concat([
         df["High"] - df["Low"],
-        (df["High"] - df["Close"].shift(1)).abs(),
-        (df["Low"]  - df["Close"].shift(1)).abs(),
+        (df["High"] - prev_close).abs(),
+        (df["Low"]  - prev_close).abs(),
     ], axis=1).max(axis=1)
-    df["atr"] = df["tr"].ewm(span=ATR_PERIOD, adjust=False).mean()
+    df["atr"] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
     return df.dropna().reset_index(drop=True)
 
 
@@ -112,10 +92,8 @@ def check_signals(df: pd.DataFrame) -> dict:
     )
 
     date_val = t0["Date"]
-    date_str = date_val.strftime("%d %b %Y") if hasattr(date_val, "strftime") else str(date_val)
-
     detail = {
-        "date":      date_str,
+        "date":      date_val.strftime("%d %b %Y") if hasattr(date_val, "strftime") else str(date_val),
         "close":     round(float(t0["Close"]),    2),
         "ema_fast":  round(float(t0["ema_fast"]), 2),
         "ema_slow":  round(float(t0["ema_slow"]), 2),
@@ -126,9 +104,6 @@ def check_signals(df: pd.DataFrame) -> dict:
     return {"ema_cross": ema_cross, "atr_buy": atr_buy, "detail": detail}
 
 
-# ============================================================
-# 📨  Telegram
-# ============================================================
 def send_telegram(message: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
@@ -144,9 +119,8 @@ def send_telegram(message: str) -> bool:
 
 
 def build_message(ticker: str, sig: dict) -> str:
-    d    = sig["detail"]
-    code = ticker.replace(".BK", "")
-    out  = [
+    d, code = sig["detail"], ticker.replace(".BK", "")
+    out = [
         f"🔔 <b>SET ALERT</b>  |  <b>{code}</b>",
         f"📅 {d['date']}   ราคาปิด <b>{d['close']}</b>",
     ]
@@ -156,7 +130,6 @@ def build_message(ticker: str, sig: dict) -> str:
             f"📈 <b>EMA Crossover (วันแรก)</b>",
             f"   EMA{EMA_FAST} = {d['ema_fast']}",
             f"   EMA{EMA_SLOW} = {d['ema_slow']}",
-            f"   ↳ Bullish cross เพิ่งเกิดขึ้น",
         ]
     if sig["atr_buy"]:
         out += [
@@ -171,9 +144,6 @@ def build_message(ticker: str, sig: dict) -> str:
     return "\n".join(out)
 
 
-# ============================================================
-# 🚀  Main
-# ============================================================
 def run():
     now = datetime.utcnow()
     log.info("=" * 52)
@@ -181,8 +151,6 @@ def run():
     log.info(f"Watchlist: {len(WATCHLIST)} หุ้น")
     log.info("=" * 52)
 
-    # GitHub Actions รันตาม schedule จันทร์-ศุกร์แล้ว
-    # ตรวจซ้ำกันแน่ๆ ในกรณี manual trigger วันหยุด
     if now.weekday() >= 5:
         log.info("วันหยุดตลาด — ออก")
         send_telegram("📊 SET Alert: วันหยุดตลาด ไม่สแกน")
@@ -209,35 +177,24 @@ def run():
 
         if sig["ema_cross"] or sig["atr_buy"]:
             found.append(ticker)
-            ok = send_telegram(build_message(ticker, sig))
-            if ok:
+            if send_telegram(build_message(ticker, sig)):
                 sent += 1
                 log.info(f"  📨 Telegram ส่งแล้ว")
             time.sleep(1)
 
         time.sleep(0.3)
 
-    # สรุปประจำวัน
     if found:
         codes   = ", ".join(t.replace(".BK", "") for t in found)
-        summary = (
-            f"📊 <b>SET Alert สรุปประจำวัน</b>\n"
-            f"📅 {now.strftime('%d %b %Y')} (UTC)\n"
-            f"สแกน {len(WATCHLIST)} หุ้น\n"
-            f"🔔 พบสัญญาณ: <b>{codes}</b>"
-        )
+        summary = f"📊 <b>SET Alert สรุป</b> {now.strftime('%d %b %Y')}\nสแกน {len(WATCHLIST)} หุ้น\n🔔 พบสัญญาณ: <b>{codes}</b>"
     else:
-        summary = (
-            f"📊 <b>SET Alert สรุปประจำวัน</b>\n"
-            f"📅 {now.strftime('%d %b %Y')} (UTC)\n"
-            f"สแกน {len(WATCHLIST)} หุ้น\n"
-            f"✅ ไม่มีสัญญาณวันนี้"
-        )
+        summary = f"📊 <b>SET Alert สรุป</b> {now.strftime('%d %b %Y')}\nสแกน {len(WATCHLIST)} หุ้น\n✅ ไม่มีสัญญาณวันนี้"
+
     if skipped:
-        summary += f"\n⚠️ ข้าม: {', '.join([t.replace('.BK','') for t in skipped])}"
+        summary += f"\n⚠️ ข้าม: {', '.join(t.replace('.BK','') for t in skipped)}"
 
     send_telegram(summary)
-    log.info(f"Done — สัญญาณ {len(found)} ตัว | ส่ง {sent} ครั้ง")
+    log.info(f"Done — สัญญาณ {len(found)} | ส่ง {sent}")
 
 
 if __name__ == "__main__":
