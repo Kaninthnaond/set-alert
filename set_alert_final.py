@@ -17,6 +17,7 @@ WATCHLIST = [
     "COCOCO.BK","OR.BK",  "TU.BK",
     "ASW.BK",  "AURA.BK", "BAM.BK",   "DIF.BK",
     "NER.BK",  "SAK.BK",  "SJWD.BK",  "SPRC.BK",
+    "SABINA.BK",  "PLANB.BK",  "HMPRO.BK",  "BJC.BK",
 ]
 
 EMA_FAST   = 12
