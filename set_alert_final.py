@@ -1,13 +1,12 @@
 """
-SET Stock Alert — GitHub Actions Edition (no pandas_ta)
-EMA และ ATR คำนวณด้วย pandas โดยตรง
+SET Stock Alert — GitHub Actions Edition
+data source: Yahoo Finance (yfinance) — ทำงานได้บน GitHub Actions
 """
 import os, sys, time, logging, requests
 import pandas as pd
+import yfinance as yf
 from datetime import datetime
-from io import StringIO
 
-# ============================================================
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
@@ -17,13 +16,12 @@ WATCHLIST = [
     "SNNP.BK", "TFM.BK",  "OSP.BK",   "BGRIM.BK",
     "COCOCO.BK","OR.BK",  "TU.BK",
     "ASW.BK",  "AURA.BK", "BAM.BK",   "DIF.BK",
-    "AOT.BK",  "ADVANC.BK",  "GULF.BK",  "DELTA.BK",
+    "NER.BK",  "SAK.BK",  "SJWD.BK",  "SPRC.BK",
 ]
 
 EMA_FAST   = 12
 EMA_SLOW   = 26
 ATR_PERIOD = 14
-# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,25 +31,18 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def stooq_ticker(ticker: str) -> str:
-    code, exch = ticker.upper().split(".")
-    return f"{code.lower()}.{'th' if exch == 'BK' else exch.lower()}"
-
-
 def fetch_ohlcv(ticker: str) -> pd.DataFrame | None:
-    url = f"https://stooq.com/q/d/l/?s={stooq_ticker(ticker)}&i=d"
     try:
-        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code != 200 or len(r.text) < 100:
-            log.warning(f"{ticker}: HTTP {r.status_code}")
-            return None
-        df = pd.read_csv(StringIO(r.text), parse_dates=["Date"])
-        df.columns = [c.strip().title() for c in df.columns]
-        df = df.sort_values("Date").reset_index(drop=True)
-        if len(df) < 40:
+        t  = yf.Ticker(ticker)
+        df = t.history(period="6mo", interval="1d", auto_adjust=True)
+        if df.empty or len(df) < 40:
             log.warning(f"{ticker}: ข้อมูลน้อยเกินไป ({len(df)} rows)")
             return None
-        return df
+        df.index = pd.to_datetime(df.index)
+        # ทำให้ timezone-naive เพื่อหลีกเลี่ยง comparison error
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        return df[["Open","High","Low","Close","Volume"]]
     except Exception as e:
         log.warning(f"{ticker}: fetch failed — {e}")
         return None
@@ -59,11 +50,9 @@ def fetch_ohlcv(ticker: str) -> pd.DataFrame | None:
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # EMA ด้วย pandas ewm
     df["ema_fast"] = df["Close"].ewm(span=EMA_FAST, adjust=False).mean()
     df["ema_slow"] = df["Close"].ewm(span=EMA_SLOW, adjust=False).mean()
-    # ATR คำนวณเอง
-    prev_close = df["Close"].shift(1)
+    prev_close     = df["Close"].shift(1)
     tr = pd.concat([
         df["High"] - df["Low"],
         (df["High"] - prev_close).abs(),
@@ -91,9 +80,10 @@ def check_signals(df: pd.DataFrame) -> dict:
         (float(t1["Close"]) <= atr_lvl_prev)
     )
 
-    date_val = t0["Date"]
+    idx = t0.name
+    date_str = idx.strftime("%d %b %Y") if hasattr(idx, "strftime") else str(idx)
     detail = {
-        "date":      date_val.strftime("%d %b %Y") if hasattr(date_val, "strftime") else str(date_val),
+        "date":      date_str,
         "close":     round(float(t0["Close"]),    2),
         "ema_fast":  round(float(t0["ema_fast"]), 2),
         "ema_slow":  round(float(t0["ema_slow"]), 2),
@@ -147,12 +137,11 @@ def build_message(ticker: str, sig: dict) -> str:
 def run():
     now = datetime.utcnow()
     log.info("=" * 52)
-    log.info(f"SET Alert — {now.strftime('%Y-%m-%d %H:%M UTC')}")
+    log.info(f"SET Alert (yfinance) — {now.strftime('%Y-%m-%d %H:%M UTC')}")
     log.info(f"Watchlist: {len(WATCHLIST)} หุ้น")
     log.info("=" * 52)
 
     if now.weekday() >= 5:
-        log.info("วันหยุดตลาด — ออก")
         send_telegram("📊 SET Alert: วันหยุดตลาด ไม่สแกน")
         return
 
@@ -182,10 +171,10 @@ def run():
                 log.info(f"  📨 Telegram ส่งแล้ว")
             time.sleep(1)
 
-        time.sleep(0.3)
+        time.sleep(0.5)
 
     if found:
-        codes   = ", ".join(t.replace(".BK", "") for t in found)
+        codes   = ", ".join(t.replace(".BK","") for t in found)
         summary = f"📊 <b>SET Alert สรุป</b> {now.strftime('%d %b %Y')}\nสแกน {len(WATCHLIST)} หุ้น\n🔔 พบสัญญาณ: <b>{codes}</b>"
     else:
         summary = f"📊 <b>SET Alert สรุป</b> {now.strftime('%d %b %Y')}\nสแกน {len(WATCHLIST)} หุ้น\n✅ ไม่มีสัญญาณวันนี้"
