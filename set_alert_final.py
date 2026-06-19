@@ -60,6 +60,7 @@ def load_watchlist(gc) -> list[str]:
         v.strip().upper()
         for v in vals[SKIP_ROWS:]
         if v.strip() and v.strip().upper() not in ("TICKER", "")
+        and v.strip().upper().endswith(".BK")
     ]
     log.info(f"โหลด Watchlist จาก Sheets: {len(tickers)} หุ้น")
     return tickers
