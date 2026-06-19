@@ -2,8 +2,8 @@ name: SET Stock Alert
 
 on:
   schedule:
-    - cron: "10 10 * * 1-5"
-  workflow_dispatch:
+    - cron: "10 10 * * 1-5"   # 17:10 น. เวลาไทย ทุกจันทร์-ศุกร์
+  workflow_dispatch:            # รันด้วยมือได้จาก Actions tab
 
 jobs:
   scan:
@@ -22,10 +22,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pandas yfinance requests
+          pip install pandas yfinance requests gspread google-auth
 
       - name: Run SET Alert
         env:
-          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_TOKEN:      ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          SPREADSHEET_ID:      ${{ secrets.SPREADSHEET_ID }}
+          GOOGLE_CREDENTIALS:  ${{ secrets.GOOGLE_CREDENTIALS }}
         run: python set_alert_final.py
