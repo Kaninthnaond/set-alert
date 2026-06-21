@@ -23,6 +23,9 @@ EMA_FAST   = 12
 EMA_SLOW   = 26
 ATR_PERIOD = 14
 
+RVOL_LOOKBACK        = 20    # จำนวนวันย้อนหลังที่ใช้คำนวณวอลุ่มเฉลี่ย (ไม่รวมวันล่าสุด)
+RVOL_ALERT_THRESHOLD = 1.5   # วอลุ่มวันนี้ >= ค่านี้ x ค่าเฉลี่ย ถือว่า "ผิดปกติ" น่าสนใจ
+
 # ============================================================
 # LOGGING
 # ============================================================
@@ -73,8 +76,8 @@ def write_scanlog(gc, rows: list):
         try:
             ws = sh.worksheet("ScanLog")
         except:
-            ws = sh.add_worksheet(title="ScanLog", rows=2000, cols=10)
-            ws.append_row(["Date","Ticker","Bucket","Close","EMA12","EMA26","ATR Level","Signal","Sent?"])
+            ws = sh.add_worksheet(title="ScanLog", rows=2000, cols=11)
+            ws.append_row(["Date","Ticker","Bucket","Close","EMA12","EMA26","ATR Level","RVOL","Signal","Sent?"])
         for row in rows:
             ws.append_row(row)
         log.info(f"เขียน ScanLog {len(rows)} แถว")
@@ -113,8 +116,19 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna().reset_index(drop=True)
 
 
+def compute_rvol(df: pd.DataFrame) -> float | None:
+    """RVOL = วอลุ่มล่าสุด / วอลุ่มเฉลี่ย RVOL_LOOKBACK วันก่อนหน้า (ไม่รวมวันล่าสุด)"""
+    if len(df) < RVOL_LOOKBACK + 1:
+        return None
+    today_vol = float(df["Volume"].iloc[-1])
+    avg_vol   = float(df["Volume"].iloc[-(RVOL_LOOKBACK + 1):-1].mean())
+    if avg_vol <= 0:
+        return None
+    return today_vol / avg_vol
+
+
 def check_signals(df: pd.DataFrame) -> dict:
-    empty = {"ema_cross": False, "atr_buy": False, "detail": {}}
+    empty = {"ema_cross": False, "atr_buy": False, "high_rvol": False, "detail": {}}
     if len(df) < 3:
         return empty
     t0, t1, t2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
@@ -128,6 +142,8 @@ def check_signals(df: pd.DataFrame) -> dict:
         (float(t0["Close"]) > atr_lvl_today) and
         (float(t1["Close"]) <= atr_lvl_prev)
     )
+    rvol      = compute_rvol(df)
+    high_rvol = bool(rvol is not None and rvol >= RVOL_ALERT_THRESHOLD)
     idx = t0.name
     detail = {
         "date":      idx.strftime("%d %b %Y") if hasattr(idx,"strftime") else str(idx),
@@ -137,8 +153,9 @@ def check_signals(df: pd.DataFrame) -> dict:
         "atr":       round(float(t0["atr"]),      2),
         "atr_level": round(atr_lvl_today,          2),
         "prev_high": round(float(t1["High"]),     2),
+        "rvol":      round(rvol, 2) if rvol is not None else None,
     }
-    return {"ema_cross": ema_cross, "atr_buy": atr_buy, "detail": detail}
+    return {"ema_cross": ema_cross, "atr_buy": atr_buy, "high_rvol": high_rvol, "detail": detail}
 
 
 # ============================================================
@@ -160,6 +177,19 @@ def send_telegram(message: str) -> bool:
 
 def build_message(ticker: str, sig: dict) -> str:
     d, code = sig["detail"], ticker.replace(".BK","")
+
+    # กรณีมีแต่ RVOL ผิดปกติ ไม่มีสัญญาณราคา — ใช้ข้อความแบบสั้น แยกชัดจากสัญญาณซื้อ
+    if sig["high_rvol"] and not sig["ema_cross"] and not sig["atr_buy"]:
+        out = [
+            f"📦 <b>VOLUME SPIKE</b>  |  <b>{code}</b>",
+            f"📅 {d['date']}   ราคาปิด <b>{d['close']}</b>",
+            "",
+            f"🔥 RVOL <b>{d['rvol']}x</b> (วอลุ่มสูงกว่าค่าเฉลี่ย {RVOL_LOOKBACK} วัน)",
+            "",
+            "<i>วอลุ่มผิดปกติ ยังไม่มีสัญญาณ EMA/ATR — เฝ้าดูเพิ่มเติม</i>",
+        ]
+        return "\n".join(out)
+
     out = [
         f"🔔 <b>SET ALERT</b>  |  <b>{code}</b>",
         f"📅 {d['date']}   ราคาปิด <b>{d['close']}</b>",
@@ -176,6 +206,9 @@ def build_message(ticker: str, sig: dict) -> str:
             f"   Close {d['close']}  >  ATR Level {d['atr_level']}",
             f"   (High เมื่อวาน {d['prev_high']} + ATR{ATR_PERIOD} {d['atr']})",
         ]
+    if d.get("rvol") is not None:
+        tag = " 🔥" if sig["high_rvol"] else ""
+        out += ["", f"📦 RVOL {d['rvol']}x{tag}"]
     if sig["ema_cross"] and sig["atr_buy"]:
         out += ["", "⭐ <b>Double Signal!</b>"]
     out += ["", "<i>ข้อมูลเพื่อการศึกษาเท่านั้น</i>"]
@@ -203,7 +236,7 @@ def run():
         send_telegram("⚠️ SET Alert: ไม่พบหุ้นใน Watchlist sheet")
         return
 
-    found, skipped, sent = [], [], 0
+    found, vol_only, skipped, sent = [], [], [], 0
     log_rows = []
 
     for ticker in watchlist:
@@ -211,7 +244,7 @@ def run():
         df = fetch_ohlcv(ticker)
         if df is None:
             skipped.append(ticker)
-            log_rows.append([now.strftime("%Y-%m-%d"), ticker, "", "", "", "", "", "fetch_failed", "—"])
+            log_rows.append([now.strftime("%Y-%m-%d"), ticker, "", "", "", "", "", "", "fetch_failed", "—"])
             time.sleep(0.5)
             continue
 
@@ -222,9 +255,10 @@ def run():
         flags = []
         if sig["ema_cross"]: flags.append("EMA_CROSS")
         if sig["atr_buy"]:   flags.append("ATR_BUY")
+        if sig["high_rvol"]: flags.append("HIGH_RVOL")
         signal_str = " ".join(flags) or "none"
 
-        log.info(f"  rows={len(df)} Close={d.get('close','?')} Signal={signal_str}")
+        log.info(f"  rows={len(df)} Close={d.get('close','?')} RVOL={d.get('rvol','?')} Signal={signal_str}")
 
         log_rows.append([
             now.strftime("%Y-%m-%d"),
@@ -233,11 +267,15 @@ def run():
             d.get("ema_fast",""),
             d.get("ema_slow",""),
             d.get("atr_level",""),
+            d.get("rvol",""),
             signal_str, ""
         ])
 
-        if sig["ema_cross"] or sig["atr_buy"]:
-            found.append(ticker)
+        if sig["ema_cross"] or sig["atr_buy"] or sig["high_rvol"]:
+            if sig["ema_cross"] or sig["atr_buy"]:
+                found.append(ticker)
+            else:
+                vol_only.append(ticker)
             ok = send_telegram(build_message(ticker, sig))
             if ok:
                 sent += 1
@@ -248,11 +286,14 @@ def run():
         time.sleep(0.4)
 
     # สรุปประจำวัน
-    if found:
-        codes   = ", ".join(t.replace(".BK","") for t in found)
+    if found or vol_only:
+        parts = []
+        if found:
+            parts.append(f"🔔 สัญญาณ: <b>{', '.join(t.replace('.BK','') for t in found)}</b>")
+        if vol_only:
+            parts.append(f"📦 วอลุ่มผิดปกติ: <b>{', '.join(t.replace('.BK','') for t in vol_only)}</b>")
         summary = (f"📊 <b>SET Alert สรุป</b> {now.strftime('%d %b %Y')}\n"
-                   f"สแกน {len(watchlist)} หุ้น\n"
-                   f"🔔 พบสัญญาณ: <b>{codes}</b>")
+                   f"สแกน {len(watchlist)} หุ้น\n" + "\n".join(parts))
     else:
         summary = (f"📊 <b>SET Alert สรุป</b> {now.strftime('%d %b %Y')}\n"
                    f"สแกน {len(watchlist)} หุ้น\n"
@@ -266,7 +307,7 @@ def run():
     # เขียน ScanLog กลับ Sheets
     write_scanlog(gc, log_rows)
 
-    log.info(f"Done — สัญญาณ {len(found)} | ส่ง {sent}")
+    log.info(f"Done — สัญญาณราคา {len(found)} | วอลุ่มผิดปกติ {len(vol_only)} | ส่ง {sent}")
 
 
 if __name__ == "__main__":
