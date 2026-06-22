@@ -27,12 +27,27 @@ EMA_FAST   = 12
 EMA_SLOW   = 26
 ATR_PERIOD = 14
 
-# ---- สมมติฐานการเทรดจำลอง (ปรับได้ตรงนี้) ----
-BACKTEST_PERIOD = "2y"   # ดึงข้อมูลย้อนหลังกี่ปีมาทดสอบ
-MIN_BARS        = 60     # ต้องมีแท่งราคาขั้นต่ำเท่านี้ถึงจะทดสอบ
-STOP_ATR_MULT   = 1.0   # stop = entry − ATR(วันสัญญาณ) × ค่านี้
-TARGET_RR       = 1.5    # take-profit = ระยะ stop × ค่านี้ (R:R เป้าหมาย)
-MAX_HOLD_DAYS   = 5     # ถ้ายังไม่โดน stop/target ภายในกี่วันทำการ ให้ปิดที่ราคาปิด
+# ---- กฎการเทรดแยกตามประเภทสัญญาณ (สรุปจาก 4 รอบ backtest) ----
+# แก้ค่าได้ตรงนี้ถ้าอยากทดสอบเพิ่มเติมในอนาคต
+SIGNAL_RULES = {
+    "EMA_CROSS+ATR_BUY": {   # Double Signal — momentum แรง ให้เวลาวิ่งยาว
+        "stop_atr_mult": 1.5,
+        "target_rr":     2.0,
+        "max_hold_days": 10,
+    },
+    "EMA_CROSS": {            # EMA เดี่ยว — วิ่งสั้น ตัดเร็ว stop แคบ
+        "stop_atr_mult": 1.0,
+        "target_rr":     1.5,
+        "max_hold_days": 5,
+    },
+    "ATR_BUY": {              # ATR เดี่ยว — ใช้กฎเดิม (ยังติดลบ แต่เก็บไว้ monitor)
+        "stop_atr_mult": 1.5,
+        "target_rr":     2.0,
+        "max_hold_days": 10,
+    },
+}
+BACKTEST_PERIOD = "2y"
+MIN_BARS        = 60
 
 # ============================================================
 # LOGGING
@@ -118,8 +133,11 @@ def write_summary_sheet(gc, overall: dict, by_signal: dict):
                         s["expectancy_r"], s["profit_factor"]])
 
     ws.append_row([])
-    ws.append_row(["หมายเหตุ: stop=ATR×%.1f | target=stop×%.1f | ถือสูงสุด %d วันทำการ | ย้อนหลัง %s"
-                    % (STOP_ATR_MULT, TARGET_RR, MAX_HOLD_DAYS, BACKTEST_PERIOD)])
+    rule_note = " | ".join([
+        f"{k}: stop×{v['stop_atr_mult']} target×{v['target_rr']} hold{v['max_hold_days']}d"
+        for k, v in SIGNAL_RULES.items()
+    ])
+    ws.append_row([f"กฎแยกตามสัญญาณ: {rule_note} | ย้อนหลัง {BACKTEST_PERIOD}"])
     log.info("เขียน Backtest_Summary แล้ว")
 
 
@@ -176,26 +194,27 @@ def detect_signals(df: pd.DataFrame) -> list:
 # ============================================================
 # TRADE SIMULATION
 # ============================================================
-def simulate_trade(df: pd.DataFrame, sig_idx: int, atr_at_signal: float) -> dict | None:
+def simulate_trade(df: pd.DataFrame, sig_idx: int, atr_at_signal: float,
+                   stop_atr_mult: float, target_rr: float, max_hold_days: int) -> dict | None:
     entry_idx = sig_idx + 1
     if entry_idx >= len(df):
-        return None  # ไม่มีวันถัดไปให้เข้าซื้อ (สัญญาณอยู่ปลายข้อมูลพอดี)
+        return None
 
-    entry_price = float(df.iloc[entry_idx]["Open"])
-    stop_price  = entry_price - atr_at_signal * STOP_ATR_MULT
-    risk        = entry_price - stop_price
+    entry_price  = float(df.iloc[entry_idx]["Open"])
+    stop_price   = entry_price - atr_at_signal * stop_atr_mult
+    risk         = entry_price - stop_price
     if risk <= 0:
         return None
-    target_price = entry_price + risk * TARGET_RR
+    target_price = entry_price + risk * target_rr
 
     exit_price, exit_reason, exit_idx = None, None, None
-    last_idx = min(entry_idx + MAX_HOLD_DAYS, len(df) - 1)
+    last_idx = min(entry_idx + max_hold_days, len(df) - 1)
 
     for j in range(entry_idx, last_idx + 1):
         bar = df.iloc[j]
         hit_stop   = float(bar["Low"])  <= stop_price
         hit_target = float(bar["High"]) >= target_price
-        if hit_stop:  # ถ้าวันเดียวกันโดนทั้งคู่ ให้ stop มาก่อน (อนุรักษ์นิยม)
+        if hit_stop:
             exit_price, exit_reason, exit_idx = stop_price, "stop", j
             break
         elif hit_target:
@@ -203,7 +222,7 @@ def simulate_trade(df: pd.DataFrame, sig_idx: int, atr_at_signal: float) -> dict
             break
 
     if exit_price is None:
-        exit_idx = last_idx
+        exit_idx   = last_idx
         exit_price = float(df.iloc[exit_idx]["Close"])
         exit_reason = "time"
 
@@ -211,15 +230,17 @@ def simulate_trade(df: pd.DataFrame, sig_idx: int, atr_at_signal: float) -> dict
     r_multiple    = pnl_per_share / risk
 
     return {
-        "entry_idx": entry_idx,
-        "exit_idx": exit_idx,
-        "entry_date": df.iloc[entry_idx]["Date"].strftime("%Y-%m-%d"),
+        "entry_idx":   entry_idx,
+        "exit_idx":    exit_idx,
+        "entry_date":  df.iloc[entry_idx]["Date"].strftime("%Y-%m-%d"),
         "entry_price": round(entry_price, 2),
-        "exit_date": df.iloc[exit_idx]["Date"].strftime("%Y-%m-%d"),
-        "exit_price": round(exit_price, 2),
+        "exit_date":   df.iloc[exit_idx]["Date"].strftime("%Y-%m-%d"),
+        "exit_price":  round(exit_price, 2),
         "exit_reason": exit_reason,
-        "hold_days": exit_idx - entry_idx,
-        "r_multiple": round(r_multiple, 3),
+        "hold_days":   exit_idx - entry_idx,
+        "r_multiple":  round(r_multiple, 3),
+        "stop_used":   round(stop_atr_mult, 1),
+        "target_used": round(target_rr, 1),
     }
 
 
@@ -233,8 +254,15 @@ def backtest_ticker(ticker: str) -> list:
     trades, blocked_until = [], -1
     for s in sigs:
         if s["idx"] <= blocked_until:
-            continue  # ยังถือสถานะจากไม้ก่อนหน้าอยู่ ข้ามสัญญาณซ้อนทับ
-        t = simulate_trade(df, s["idx"], s["atr"])
+            continue
+        # ดึงกฎที่เหมาะกับสัญญาณประเภทนี้ (ถ้าไม่มีใน SIGNAL_RULES ใช้ Double Signal เป็น default)
+        rule = SIGNAL_RULES.get(s["kind"], SIGNAL_RULES["EMA_CROSS+ATR_BUY"])
+        t = simulate_trade(
+            df, s["idx"], s["atr"],
+            stop_atr_mult = rule["stop_atr_mult"],
+            target_rr     = rule["target_rr"],
+            max_hold_days = rule["max_hold_days"],
+        )
         if t is None:
             continue
         t["ticker"] = ticker
@@ -268,10 +296,16 @@ def summarize(trades: list) -> dict | None:
 
 
 def build_telegram_summary(overall: dict, by_signal: dict, n_tickers: int) -> str:
+    rule_lines = [
+        f"  • {k}: stop×{v['stop_atr_mult']} target×{v['target_rr']} hold {v['max_hold_days']}d"
+        for k, v in SIGNAL_RULES.items()
+    ]
     out = [
-        "📐 <b>SET Backtest Summary</b>",
-        f"ทดสอบย้อนหลัง {BACKTEST_PERIOD} | {n_tickers} หุ้นใน Watchlist",
-        f"กฎ: stop=ATR×{STOP_ATR_MULT} | target=stop×{TARGET_RR} | ถือสูงสุด {MAX_HOLD_DAYS} วัน",
+        "📐 <b>SET Backtest Summary (กฎแยกตามสัญญาณ)</b>",
+        f"ย้อนหลัง {BACKTEST_PERIOD} | {n_tickers} หุ้น",
+        "",
+        "กฎที่ใช้:",
+    ] + rule_lines + [
         "",
         f"รวมทั้งหมด: {overall['n_trades']} ไม้",
         f"Win Rate: <b>{overall['win_rate']}%</b>",
