@@ -30,7 +30,7 @@ ATR_PERIOD = 14
 # ---- สมมติฐานการเทรดจำลอง (ปรับได้ตรงนี้) ----
 BACKTEST_PERIOD = "2y"   # ดึงข้อมูลย้อนหลังกี่ปีมาทดสอบ
 MIN_BARS        = 60     # ต้องมีแท่งราคาขั้นต่ำเท่านี้ถึงจะทดสอบ
-STOP_ATR_MULT   = 1.5    # stop = entry − ATR(วันสัญญาณ) × ค่านี้
+STOP_ATR_MULT   = 1.0   # stop = entry − ATR(วันสัญญาณ) × ค่านี้
 TARGET_RR       = 1.5    # take-profit = ระยะ stop × ค่านี้ (R:R เป้าหมาย)
 MAX_HOLD_DAYS   = 5     # ถ้ายังไม่โดน stop/target ภายในกี่วันทำการ ให้ปิดที่ราคาปิด
 
