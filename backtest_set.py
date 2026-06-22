@@ -169,7 +169,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
         (df["High"] - pc).abs(),
         (df["Low"]  - pc).abs(),
     ], axis=1).max(axis=1)
-    df["atr"] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+    df["atr"] = tr.ewm(alpha=1/ATR_PERIOD, adjust=False).mean()  # RMA (Wilder's) — ตรงกับ TradingView
     df = df.dropna()
     df["Date"] = df.index
     df = df.reset_index(drop=True)
