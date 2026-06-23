@@ -23,6 +23,10 @@ EMA_FAST   = 12
 EMA_SLOW   = 26
 ATR_PERIOD = 14
 
+# SuperTrend — ตรงกับ indicator TradingView (CDC ActionZone) ที่ใช้งาน
+SUPERTREND_PERIOD = 10    # ATR Period ของ SuperTrend
+SUPERTREND_MULT   = 3.0   # Multiplier (hl2 ± ATR × ค่านี้)
+
 RVOL_LOOKBACK        = 20    # จำนวนวันย้อนหลังที่ใช้คำนวณวอลุ่มเฉลี่ย (ไม่รวมวันล่าสุด)
 RVOL_ALERT_THRESHOLD = 1.5   # วอลุ่มวันนี้ >= ค่านี้ x ค่าเฉลี่ย ถือว่า "ผิดปกติ" น่าสนใจ
 
@@ -104,15 +108,52 @@ def fetch_ohlcv(ticker: str) -> pd.DataFrame | None:
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    # EMA สัญญาณ CDC
     df["ema_fast"] = df["Close"].ewm(span=EMA_FAST, adjust=False).mean()
     df["ema_slow"] = df["Close"].ewm(span=EMA_SLOW, adjust=False).mean()
+
+    # ATR (Wilder's RMA) — ใช้สำหรับ SuperTrend
     pc = df["Close"].shift(1)
     tr = pd.concat([
         df["High"] - df["Low"],
         (df["High"] - pc).abs(),
         (df["Low"]  - pc).abs(),
     ], axis=1).max(axis=1)
-    df["atr"] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+    atr_st = tr.ewm(alpha=1/SUPERTREND_PERIOD, adjust=False).mean()
+
+    # SuperTrend — ตรงกับ ta.atr + สูตร TradingView Pine Script
+    hl2         = (df["High"] + df["Low"]) / 2
+    basic_upper = (hl2 + SUPERTREND_MULT * atr_st).values
+    basic_lower = (hl2 - SUPERTREND_MULT * atr_st).values
+    close_arr   = df["Close"].values
+
+    final_upper = basic_upper.copy()
+    final_lower = basic_lower.copy()
+    trend       = [1] * len(df)
+
+    for i in range(1, len(df)):
+        # Final upper band: ยึดค่าเดิมถ้าราคายังอยู่ต่ำกว่า
+        if basic_upper[i] < final_upper[i-1] or close_arr[i-1] > final_upper[i-1]:
+            final_upper[i] = basic_upper[i]
+        else:
+            final_upper[i] = final_upper[i-1]
+        # Final lower band: ยึดค่าเดิมถ้าราคายังอยู่สูงกว่า
+        if basic_lower[i] > final_lower[i-1] or close_arr[i-1] < final_lower[i-1]:
+            final_lower[i] = basic_lower[i]
+        else:
+            final_lower[i] = final_lower[i-1]
+        # Trend direction
+        if trend[i-1] == -1 and close_arr[i] > final_upper[i-1]:
+            trend[i] = 1
+        elif trend[i-1] == 1 and close_arr[i] < final_lower[i-1]:
+            trend[i] = -1
+        else:
+            trend[i] = trend[i-1]
+
+    df["st_trend"] = trend
+    df["st_upper"] = final_upper
+    df["st_lower"] = final_lower
+
     return df.dropna().reset_index(drop=True)
 
 
@@ -128,34 +169,37 @@ def compute_rvol(df: pd.DataFrame) -> float | None:
 
 
 def check_signals(df: pd.DataFrame) -> dict:
-    empty = {"ema_cross": False, "atr_buy": False, "high_rvol": False, "detail": {}}
+    empty = {"ema_cross": False, "st_buy": False, "high_rvol": False, "detail": {}}
     if len(df) < 3:
         return empty
-    t0, t1, t2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
+    t0, t1 = df.iloc[-1], df.iloc[-2]
+
+    # EMA Crossover (วันแรกที่ EMA12 ข้าม EMA26 ขึ้น)
     ema_cross = bool(
         (t0["ema_fast"] > t0["ema_slow"]) and
         (t1["ema_fast"] <= t1["ema_slow"])
     )
-    atr_lvl_today = float(t1["High"]) + float(t1["atr"])
-    atr_lvl_prev  = float(t2["High"]) + float(t2["atr"])
-    atr_buy = bool(
-        (float(t0["Close"]) > atr_lvl_today) and
-        (float(t1["Close"]) <= atr_lvl_prev)
+
+    # SuperTrend Buy — trend พลิกจากขาลง (-1) เป็นขาขึ้น (1)
+    # ตรงกับสัญญาณ Ⓑ ใน TradingView indicator
+    st_buy = bool(
+        int(t0["st_trend"]) == 1 and int(t1["st_trend"]) == -1
     )
+
     rvol      = compute_rvol(df)
     high_rvol = bool(rvol is not None and rvol >= RVOL_ALERT_THRESHOLD)
+
     idx = t0.name
     detail = {
-        "date":      idx.strftime("%d %b %Y") if hasattr(idx,"strftime") else str(idx),
+        "date":      idx.strftime("%d %b %Y") if hasattr(idx, "strftime") else str(idx),
         "close":     round(float(t0["Close"]),    2),
         "ema_fast":  round(float(t0["ema_fast"]), 2),
         "ema_slow":  round(float(t0["ema_slow"]), 2),
-        "atr":       round(float(t0["atr"]),      2),
-        "atr_level": round(atr_lvl_today,          2),
-        "prev_high": round(float(t1["High"]),     2),
+        "st_line":   round(float(t0["st_lower"]) if t0["st_trend"] == 1 else float(t0["st_upper"]), 2),
+        "st_trend":  "▲ Uptrend" if t0["st_trend"] == 1 else "▼ Downtrend",
         "rvol":      round(rvol, 2) if rvol is not None else None,
     }
-    return {"ema_cross": ema_cross, "atr_buy": atr_buy, "high_rvol": high_rvol, "detail": detail}
+    return {"ema_cross": ema_cross, "st_buy": st_buy, "high_rvol": high_rvol, "detail": detail}
 
 
 # ============================================================
@@ -179,14 +223,14 @@ def build_message(ticker: str, sig: dict) -> str:
     d, code = sig["detail"], ticker.replace(".BK","")
 
     # กรณีมีแต่ RVOL ผิดปกติ ไม่มีสัญญาณราคา — ใช้ข้อความแบบสั้น แยกชัดจากสัญญาณซื้อ
-    if sig["high_rvol"] and not sig["ema_cross"] and not sig["atr_buy"]:
+    if sig["high_rvol"] and not sig["ema_cross"] and not sig["st_buy"]:
         out = [
             f"📦 <b>VOLUME SPIKE</b>  |  <b>{code}</b>",
             f"📅 {d['date']}   ราคาปิด <b>{d['close']}</b>",
             "",
             f"🔥 RVOL <b>{d['rvol']}x</b> (วอลุ่มสูงกว่าค่าเฉลี่ย {RVOL_LOOKBACK} วัน)",
             "",
-            "<i>วอลุ่มผิดปกติ ยังไม่มีสัญญาณ EMA/ATR — เฝ้าดูเพิ่มเติม</i>",
+            "<i>วอลุ่มผิดปกติ ยังไม่มีสัญญาณ EMA/SuperTrend — เฝ้าดูเพิ่มเติม</i>",
         ]
         return "\n".join(out)
 
@@ -200,16 +244,16 @@ def build_message(ticker: str, sig: dict) -> str:
             f"   EMA{EMA_FAST} = {d['ema_fast']}",
             f"   EMA{EMA_SLOW} = {d['ema_slow']}",
         ]
-    if sig["atr_buy"]:
+    if sig["st_buy"]:
         out += ["",
-            f"💥 <b>ATR Breakout Buy (วันแรก)</b>",
-            f"   Close {d['close']}  >  ATR Level {d['atr_level']}",
-            f"   (High เมื่อวาน {d['prev_high']} + ATR{ATR_PERIOD} {d['atr']})",
+            f"Ⓑ <b>SuperTrend Buy (วันแรก)</b>",
+            f"   SuperTrend พลิกขาขึ้น | แนวรับ {d['st_line']}",
+            f"   (ATR{SUPERTREND_PERIOD} × {SUPERTREND_MULT}  ตรงกับ TradingView)",
         ]
     if d.get("rvol") is not None:
         tag = " 🔥" if sig["high_rvol"] else ""
         out += ["", f"📦 RVOL {d['rvol']}x{tag}"]
-    if sig["ema_cross"] and sig["atr_buy"]:
+    if sig["ema_cross"] and sig["st_buy"]:
         out += ["", "⭐ <b>Double Signal!</b>"]
     out += ["", "<i>ข้อมูลเพื่อการศึกษาเท่านั้น</i>"]
     return "\n".join(out)
@@ -254,7 +298,7 @@ def run():
 
         flags = []
         if sig["ema_cross"]: flags.append("EMA_CROSS")
-        if sig["atr_buy"]:   flags.append("ATR_BUY")
+        if sig["st_buy"]:    flags.append("SUPER_TREND")
         if sig["high_rvol"]: flags.append("HIGH_RVOL")
         signal_str = " ".join(flags) or "none"
 
@@ -266,13 +310,13 @@ def run():
             d.get("close",""),
             d.get("ema_fast",""),
             d.get("ema_slow",""),
-            d.get("atr_level",""),
+            d.get("st_line",""),
             d.get("rvol",""),
             signal_str, ""
         ])
 
-        if sig["ema_cross"] or sig["atr_buy"] or sig["high_rvol"]:
-            if sig["ema_cross"] or sig["atr_buy"]:
+        if sig["ema_cross"] or sig["st_buy"] or sig["high_rvol"]:
+            if sig["ema_cross"] or sig["st_buy"]:
                 found.append(ticker)
             else:
                 vol_only.append(ticker)
