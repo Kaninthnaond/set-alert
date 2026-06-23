@@ -27,20 +27,23 @@ EMA_FAST   = 12
 EMA_SLOW   = 26
 ATR_PERIOD = 14
 
-# ---- กฎการเทรดแยกตามประเภทสัญญาณ (สรุปจาก 4 รอบ backtest) ----
-# แก้ค่าได้ตรงนี้ถ้าอยากทดสอบเพิ่มเติมในอนาคต
+# SuperTrend — ตรงกับ TradingView indicator (CDC ActionZone)
+SUPERTREND_PERIOD = 10
+SUPERTREND_MULT   = 3.0
+
+# ---- กฎการเทรดแยกตามประเภทสัญญาณ ----
 SIGNAL_RULES = {
-    "EMA_CROSS+ATR_BUY": {   # Double Signal — momentum แรง ให้เวลาวิ่งยาว
+    "EMA_CROSS+SUPER_TREND": {   # Double Signal
         "stop_atr_mult": 1.5,
         "target_rr":     2.0,
         "max_hold_days": 10,
     },
-    "EMA_CROSS": {            # EMA เดี่ยว — วิ่งสั้น ตัดเร็ว stop แคบ
+    "EMA_CROSS": {               # EMA เดี่ยว
         "stop_atr_mult": 1.0,
         "target_rr":     1.5,
         "max_hold_days": 5,
     },
-    "ATR_BUY": {              # ATR เดี่ยว — ใช้กฎเดิม (ยังติดลบ แต่เก็บไว้ monitor)
+    "SUPER_TREND": {             # SuperTrend เดี่ยว
         "stop_atr_mult": 1.5,
         "target_rr":     2.0,
         "max_hold_days": 10,
@@ -159,17 +162,48 @@ def fetch_ohlcv(ticker: str) -> pd.DataFrame | None:
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """เหมือนใน set_alert_final.py แต่เก็บคอลัมน์ Date ไว้ใช้อ้างอิงตอน backtest"""
+    """คำนวณ EMA, ATR สำหรับ stop-loss, และ SuperTrend (ตรงกับ TradingView)"""
     df = df.copy()
     df["ema_fast"] = df["Close"].ewm(span=EMA_FAST, adjust=False).mean()
     df["ema_slow"] = df["Close"].ewm(span=EMA_SLOW, adjust=False).mean()
+
+    # ATR สำหรับ stop-loss (period=14)
     pc = df["Close"].shift(1)
     tr = pd.concat([
         df["High"] - df["Low"],
         (df["High"] - pc).abs(),
         (df["Low"]  - pc).abs(),
     ], axis=1).max(axis=1)
-    df["atr"] = tr.ewm(alpha=1/ATR_PERIOD, adjust=False).mean()  # RMA (Wilder's) — ตรงกับ TradingView
+    df["atr"] = tr.ewm(alpha=1/ATR_PERIOD, adjust=False).mean()
+
+    # ATR สำหรับ SuperTrend (period=10, Wilder's RMA)
+    atr_st = tr.ewm(alpha=1/SUPERTREND_PERIOD, adjust=False).mean()
+    hl2         = (df["High"] + df["Low"]) / 2
+    basic_upper = (hl2 + SUPERTREND_MULT * atr_st).values
+    basic_lower = (hl2 - SUPERTREND_MULT * atr_st).values
+    close_arr   = df["Close"].values
+
+    final_upper = basic_upper.copy()
+    final_lower = basic_lower.copy()
+    trend       = [1] * len(df)
+
+    for i in range(1, len(df)):
+        if basic_upper[i] < final_upper[i-1] or close_arr[i-1] > final_upper[i-1]:
+            final_upper[i] = basic_upper[i]
+        else:
+            final_upper[i] = final_upper[i-1]
+        if basic_lower[i] > final_lower[i-1] or close_arr[i-1] < final_lower[i-1]:
+            final_lower[i] = basic_lower[i]
+        else:
+            final_lower[i] = final_lower[i-1]
+        if trend[i-1] == -1 and close_arr[i] > final_upper[i-1]:
+            trend[i] = 1
+        elif trend[i-1] == 1 and close_arr[i] < final_lower[i-1]:
+            trend[i] = -1
+        else:
+            trend[i] = trend[i-1]
+
+    df["st_trend"] = trend
     df = df.dropna()
     df["Date"] = df.index
     df = df.reset_index(drop=True)
@@ -177,16 +211,14 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def detect_signals(df: pd.DataFrame) -> list:
-    """สแกนทุกวันในประวัติ หาแถวที่เกิด EMA crossover หรือ ATR breakout (กฎเดียวกับ set_alert_final.py)"""
+    """สแกนหา EMA Crossover และ SuperTrend Buy (ตรงกับ TradingView Ⓑ)"""
     signals = []
-    for i in range(2, len(df)):
-        t0, t1, t2 = df.iloc[i], df.iloc[i-1], df.iloc[i-2]
+    for i in range(1, len(df)):
+        t0, t1 = df.iloc[i], df.iloc[i-1]
         ema_cross = bool((t0["ema_fast"] > t0["ema_slow"]) and (t1["ema_fast"] <= t1["ema_slow"]))
-        atr_lvl_today = float(t1["High"]) + float(t1["atr"])
-        atr_lvl_prev  = float(t2["High"]) + float(t2["atr"])
-        atr_buy = bool((float(t0["Close"]) > atr_lvl_today) and (float(t1["Close"]) <= atr_lvl_prev))
-        if ema_cross or atr_buy:
-            kind = "+".join([k for k, v in [("EMA_CROSS", ema_cross), ("ATR_BUY", atr_buy)] if v])
+        st_buy    = bool(int(t0["st_trend"]) == 1 and int(t1["st_trend"]) == -1)
+        if ema_cross or st_buy:
+            kind = "+".join([k for k, v in [("EMA_CROSS", ema_cross), ("SUPER_TREND", st_buy)] if v])
             signals.append({"idx": i, "kind": kind, "atr": float(t0["atr"])})
     return signals
 
@@ -256,7 +288,7 @@ def backtest_ticker(ticker: str) -> list:
         if s["idx"] <= blocked_until:
             continue
         # ดึงกฎที่เหมาะกับสัญญาณประเภทนี้ (ถ้าไม่มีใน SIGNAL_RULES ใช้ Double Signal เป็น default)
-        rule = SIGNAL_RULES.get(s["kind"], SIGNAL_RULES["EMA_CROSS+ATR_BUY"])
+        rule = SIGNAL_RULES.get(s["kind"], SIGNAL_RULES["EMA_CROSS+SUPER_TREND"])
         t = simulate_trade(
             df, s["idx"], s["atr"],
             stop_atr_mult = rule["stop_atr_mult"],
