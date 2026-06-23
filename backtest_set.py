@@ -288,7 +288,7 @@ def backtest_ticker(ticker: str) -> list:
         if s["idx"] <= blocked_until:
             continue
         # ดึงกฎที่เหมาะกับสัญญาณประเภทนี้ (ถ้าไม่มีใน SIGNAL_RULES ใช้ Double Signal เป็น default)
-        rule = SIGNAL_RULES.get(s["kind"], SIGNAL_RULES["EMA_CROSS+ATR_BUY"])
+        rule = SIGNAL_RULES.get(s["kind"], SIGNAL_RULES["EMA_CROSS+SUPER_TREND"])
         t = simulate_trade(
             df, s["idx"], s["atr"],
             stop_atr_mult = rule["stop_atr_mult"],
