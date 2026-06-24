@@ -1,6 +1,6 @@
 """
 SET Stock Alert — GitHub Actions + Google Sheets Watchlist
-ดึง Watchlist จาก Google Sheets โดยใช้ Service Account Jun23 ✅ EMA Crossover + SuperTrend + RVOL
+ดึง Watchlist จาก Google Sheets โดยใช้ Service Account
 """
 import os, sys, time, logging, requests, json, base64
 import pandas as pd
@@ -154,7 +154,9 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["st_upper"] = final_upper
     df["st_lower"] = final_lower
 
-    return df.dropna().reset_index(drop=True)
+    df = df.dropna()
+    df["Date"] = df.index  # เก็บ datetime index ไว้ในคอลัมน์ก่อน reset
+    return df.reset_index(drop=True)
 
 
 def compute_rvol(df: pd.DataFrame) -> float | None:
@@ -189,7 +191,7 @@ def check_signals(df: pd.DataFrame) -> dict:
     rvol      = compute_rvol(df)
     high_rvol = bool(rvol is not None and rvol >= RVOL_ALERT_THRESHOLD)
 
-    idx = t0.name
+    idx = t0.get("Date", None)
     detail = {
         "date":      idx.strftime("%d %b %Y") if hasattr(idx, "strftime") else str(idx),
         "close":     round(float(t0["Close"]),    2),
