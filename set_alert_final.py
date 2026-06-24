@@ -1,6 +1,6 @@
 """
 SET Stock Alert — GitHub Actions + Google Sheets Watchlist
-ดึง Watchlist จาก Google Sheets โดยใช้ Service Account Jun23
+ดึง Watchlist จาก Google Sheets โดยใช้ Service Account Jun22 ATR
 """
 import os, sys, time, logging, requests, json, base64
 import pandas as pd
