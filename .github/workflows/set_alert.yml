@@ -1,9 +1,10 @@
 name: SET Stock Alert
-
 on:
   schedule:
-    - cron: "10 10 * * 1-5"   # 17:10 น. เวลาไทย ทุกจันทร์-ศุกร์
-  workflow_dispatch:            # รันด้วยมือได้จาก Actions tab
+    - cron: "30 2 * * 1-5"   # 09:30 น. — ก่อนตลาดเปิด (เตรียมตัว)
+    - cron: "30 6 * * 1-5"   # 13:30 น. — ช่วงบ่าย (ระหว่างวัน)
+    - cron: "10 10 * * 1-5"  # 17:10 น. — หลังปิดตลาด (รอบหลัก)
+  workflow_dispatch:   # รันด้วยมือได้จาก Actions tab
 
 jobs:
   scan:
